@@ -1,0 +1,20 @@
+{
+  "enabled": {"description": "启用记忆", "type": "bool", "default": true},
+  "mode": {"description": "运行模式", "type": "string", "default": "local", "options": ["local", "remote"], "hint": "local 开箱使用外置数据目录；remote 连接独立服务。"},
+  "data_dir": {"description": "本地记忆数据目录", "type": "string", "default": "", "hint": "留空使用 data/plugin_data/astrbot_plugin_chuanda_memory；可填持久磁盘的绝对路径。不要放在插件源码目录内。"},
+  "memory_provider_id": {"description": "后台整理使用的模型提供商 ID", "type": "string", "default": "", "hint": "local 模式留空时使用该消息会话当前的提供商；可指定已有提供商 ID，无需再填 API Key。"},
+  "allowed_groups": {"description": "启用的群 ID", "type": "list", "default": [], "hint": "留空处理此机器人接收到的全部群；推荐填入你们的群 ID。"},
+  "enable_private_memory": {"description": "启用私聊记忆（与群聊隔离）", "type": "bool", "default": true},
+  "capture_all_messages": {"description": "观察到达 AstrBot 的普通消息", "type": "bool", "default": true, "hint": "关闭后只观察触发标准 LLM 请求的消息；无法读取接入端未收到的消息。"},
+  "enable_chuanda_persona": {"description": "启用串大人格", "type": "bool", "default": true, "hint": "如已有 AstrBot 人格可关闭，只使用记忆。"},
+  "batch_delay_seconds": {"description": "后台整理等待秒数", "type": "int", "default": 20},
+  "batch_size": {"description": "每批最多消息数", "type": "int", "default": 16},
+  "extraction_timeout_seconds": {"description": "整理模型超时秒数", "type": "int", "default": 45},
+  "recall_limit": {"description": "每次最多召回条数", "type": "int", "default": 8},
+  "context_char_budget": {"description": "召回资料字符预算", "type": "int", "default": 5000},
+  "joke_cooldown_hours": {"description": "同一梗召回冷却小时数", "type": "int", "default": 6},
+  "raw_retention_days": {"description": "已处理原始消息保留天数", "type": "int", "default": 14},
+  "service_url": {"description": "独立服务地址", "type": "string", "default": "http://127.0.0.1:8765"},
+  "service_token": {"description": "独立服务访问令牌", "type": "string", "default": "", "hint": "remote 模式必填至少24字符；也可通过 CHUANDA_MEMORY_TOKEN 环境变量设置。"},
+  "service_timeout_seconds": {"description": "独立服务请求超时秒数", "type": "int", "default": 3}
+}
