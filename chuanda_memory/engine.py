@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from .extraction import SYSTEM_PROMPT, extraction_prompt, parse_candidates
+from .extraction import extraction_prompt, parse_candidates
 from .models import Observation
 from .store import MemoryStore
 
@@ -31,13 +31,17 @@ async def settled_thread_call(function, *args, **kwargs):
 
 
 class MemoryEngine:
-    def __init__(self, store: MemoryStore, model_call: ModelCall, *, delay=20, batch_size=16, timeout=45, retention_days=14):
+    def __init__(self, store: MemoryStore, model_call: ModelCall, *, delay=300, batch_size=20, timeout=45, retention_days=14,
+                 min_batch=1, max_wait=1800, batching_mode="person"):
         self.store = store
         self.model_call = model_call
         self.delay = max(0, float(delay))
         self.batch_size = max(1, min(40, int(batch_size)))
         self.timeout = max(1, float(timeout))
         self.retention_days = max(1, int(retention_days))
+        self.min_batch = max(1, min(self.batch_size, int(min_batch)))
+        self.max_wait = max(1, float(max_wait))
+        self.batching_mode = batching_mode
         self._task = None
         self._wake = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -51,13 +55,17 @@ class MemoryEngine:
     async def run_once(self):
         # A single worker per database; the lock also prevents manual flush races.
         async with self._run_lock:
-            batch = await settled_thread_call(self.store.next_batch, delay=self.delay, limit=self.batch_size)
+            batch = await settled_thread_call(self.store.next_batch, delay=self.delay, limit=self.batch_size,
+                                               mode=self.batching_mode, min_batch=self.min_batch, max_wait=self.max_wait)
             if not batch:
                 return False
             provider = next((m["provider_id"] for m in reversed(batch["messages"]) if m["provider_id"]), "")
             try:
+                system = await settled_thread_call(self.store.summary_prompt)
+                prompt = extraction_prompt(batch["messages"], batch["existing"], recent_context=batch.get("recent_context"),
+                                           target_id=batch.get("target_id"))
                 result = await asyncio.wait_for(
-                    self.model_call(SYSTEM_PROMPT, extraction_prompt(batch["messages"], batch["existing"]), provider),
+                    self.model_call(system, prompt, provider),
                     timeout=self.timeout,
                 )
                 candidates = parse_candidates(result)
@@ -66,7 +74,7 @@ class MemoryEngine:
             except asyncio.CancelledError:
                 raise  # Observations remain pending across a reload or restart.
             except Exception as exc:
-                await settled_thread_call(self.store.fail_batch, batch)
+                await settled_thread_call(self.store.fail_batch, batch, type(exc).__name__)
                 # Provider exceptions can contain API keys or message text; don't log their body.
                 logger.warning("Chuanda memory extraction deferred (%s)", type(exc).__name__)
             return True

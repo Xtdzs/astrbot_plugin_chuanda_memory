@@ -48,10 +48,14 @@ class ChuandaMemoryPlugin(Star):
                 source = Path(__file__).resolve().parent
                 if directory == source or source in directory.parents:
                     raise ValueError("记忆目录不能位于插件代码目录内，请选择外置数据目录")
-                store = await asyncio.to_thread(MemoryStore, directory, readable_background=True)
+                store = await asyncio.to_thread(MemoryStore, directory, readable_background=True,
+                                                max_person_memories=int(self.config.get("max_person_memories", 80)),
+                                                max_group_memories=int(self.config.get("max_group_memories", 160)))
                 await asyncio.to_thread(store.prune, int(self.config.get("raw_retention_days", 14)))
-                engine = MemoryEngine(store, self._call_model, delay=float(self.config.get("batch_delay_seconds", 20)),
-                                      batch_size=int(self.config.get("batch_size", 16)),
+                engine = MemoryEngine(store, self._call_model, delay=float(self.config.get("person_idle_seconds", 300)),
+                                      batch_size=int(self.config.get("person_batch_size", 20)),
+                                      min_batch=int(self.config.get("person_idle_min_messages", 3)),
+                                      max_wait=float(self.config.get("person_max_wait_seconds", 1800)),
                                       timeout=float(self.config.get("extraction_timeout_seconds", 45)),
                                       retention_days=int(self.config.get("raw_retention_days", 14)))
                 self.backend = LocalBackend(engine, recall_limit=int(self.config.get("recall_limit", 8)),
@@ -179,7 +183,7 @@ class ChuandaMemoryPlugin(Star):
             ns, scope, sender = self._identity(event)
             action = action.casefold()
             if action == "help":
-                text = ("/cdmem status\n/cdmem show [user_id]\n/cdmem group\n"
+                text = ("/cdmem status\n/cdmem show [user_id]\n/cdmem group\n/cdmem prompt (admin)\n"
                         "/cdmem pause\n/cdmem resume\n/cdmem clear\n/cdmem forget <memory_id>\n"
                         "show 默认查看自己，其他用户档案仅管理员可看。clear 清空当前范围内与你相关的记忆并暂停采集。")
             elif action == "pause":
@@ -193,8 +197,25 @@ class ChuandaMemoryPlugin(Star):
                 text = "已清空当前范围内与你相关的记忆和来源消息，并暂停采集。用 /cdmem resume 恢复。"
             elif action == "status":
                 profile = await self.backend.profile(ns, scope, sender)
+                stats = profile.get("stats", {})
                 text = (f"CDMem: {__version__}\nPlatform: {event.get_platform_name()}\nGroup ID: {event.get_group_id() or '(private)'}\n"
-                        f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\nMemories: {len(profile['memories'])}")
+                        f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\n"
+                        f"Personal memories: {len(profile['memories'])}\nGroup memories: {stats.get('group_memories', 0)}\n"
+                        f"Messages (retained): {stats.get('retained', 0)}\nProcessed: {stats.get('processed', 0)}\n"
+                        f"Pending: {stats.get('pending', 0)}\nFailed: {stats.get('failed', 0)}")
+                last = stats.get("last_summary")
+                if last:
+                    text += f"\nLast summary: {last['outcome']} (saved={last['written']}, rejected={last['rejected']})"
+                    if last.get("error_type"):
+                        text += f" [{last['error_type']}]"
+            elif action == "prompt":
+                if not event.is_admin():
+                    text = "总结提示词由 AstrBot 管理员查看和修改。"
+                elif isinstance(self.backend, LocalBackend):
+                    text = ("总结策略文件：\n" + str(self.backend.store.prompt_path) + "\n\n" +
+                            self.backend.store.prompt_path.read_text(encoding="utf-8-sig")[:3500])
+                else:
+                    text = "总结策略在记忆服务的数据目录 summary_prompt.txt 中，修改后下次后台整理生效。"
             elif action in {"show", "group"}:
                 subject = "@group" if action == "group" else (target or sender)
                 if subject != sender and action != "group" and not event.is_admin():
@@ -221,7 +242,7 @@ class ChuandaMemoryPlugin(Star):
             deleted = await self.backend.forget(ns, scope, sender, memory_id, admin=event.is_admin())
             return "已删除这条记忆，并阻止同主题自动重新写入。" if deleted else "当前聊天范围内没有这条记忆。"
         except PermissionError:
-            return "只能删除与你相关的记忆；其他记忆由 AstrBot 管理员管理。"
+            return "只能删除与你相关的记忆；群整体记忆和其他人的记忆由 AstrBot 管理员管理。"
 
     async def terminate(self):
         self._closed = True

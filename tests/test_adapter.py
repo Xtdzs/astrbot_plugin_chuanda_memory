@@ -94,7 +94,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append(kwargs)
                 return SimpleNamespace(completion_text='{"memories":[]}')
         self.host = Host()
-        self.plugin = self.module.ChuandaMemoryPlugin(self.host, {"data_dir": self.temp.name, "batch_delay_seconds": 3600})
+        self.plugin = self.module.ChuandaMemoryPlugin(self.host, {"data_dir": self.temp.name, "person_idle_seconds": 3600,
+                                                               "person_idle_min_messages": 1})
         await self.plugin.initialize()
         self.addAsyncCleanup(self.plugin.terminate)
 
@@ -138,7 +139,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
     async def test_blocked_group_status_returns_real_id_without_backend_or_llm(self):
-        plugin = self.module.ChuandaMemoryPlugin(self.host, {"allowed_groups": ["881612201"]})
+        plugin = self.module.ChuandaMemoryPlugin(self.host, {"allowed_groups": ["123456789"]})
         event = Event(group="real-qq-group-openid", text="/cdmem status")
         replies = [reply async for reply in plugin.memory_command(event, "status")]
         self.assertTrue(event.stopped)

@@ -93,3 +93,7 @@ python -m chuanda_memory profile --data-dir /srv/chuanda-memory \
 ## 本地查看副本
 
 独立服务同样在 `--data-dir` 目录维护 `memory.md` 和 `memory.json`。导出使用独立后台线程和只读 WAL 快照，约0.5秒合并多次更新，不让 HTTP 消息请求等待文件写入。SQLite 为事实来源；重启会自动重建副本，删除会在下一轮后台同步移除副本中的内容。
+
+## v0.3 分批与策略
+
+服务默认按成员20条批量整理；至少3条、空闲300秒可提前处理，最长1800秒兜底。可用 `--batch-size`、`--delay`、`--min-batch`、`--max-wait` 修改。每次总结同时参考同群上下文，生成个人与群整体记忆。数据目录中的 `summary_prompt.txt` 可以编辑，后台下一次读取；API profile 增加 stats 字段以区分消息进度和长期记忆。旧数据库保留，新增辅助统计表，不改已有记忆字段。

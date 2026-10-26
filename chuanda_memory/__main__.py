@@ -11,7 +11,10 @@ def main():
     server.add_argument("--data-dir", required=True)
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
-    server.add_argument("--delay", type=float, default=20)
+    server.add_argument("--delay", type=float, default=300)
+    server.add_argument("--batch-size", type=int, default=20)
+    server.add_argument("--min-batch", type=int, default=3)
+    server.add_argument("--max-wait", type=float, default=1800)
     backup = sub.add_parser("backup")
     backup.add_argument("--data-dir", required=True)
     export = sub.add_parser("export", help="Rebuild local memory.md and memory.json from SQLite")
@@ -22,7 +25,7 @@ def main():
     args = parser.parse_args()
     if args.command == "serve":
         from .server import serve
-        serve(args.data_dir, args.host, args.port, args.delay)
+        serve(args.data_dir, args.host, args.port, args.delay, args.batch_size, args.min_batch, args.max_wait)
     elif args.command == "backup":
         print(MemoryStore(args.data_dir).backup())
     elif args.command == "export":

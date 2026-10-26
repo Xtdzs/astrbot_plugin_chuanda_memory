@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import difflib
 import logging
 import math
 import re
@@ -8,15 +10,48 @@ import sqlite3
 import threading
 import time
 import uuid
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Observation
 from .readable import CoalescingWriter, snapshot, write_views
+from .extraction import CONTRACT_PROMPT, DEFAULT_SUMMARY_POLICY
 
-KINDS = {"fact", "preference", "boundary", "state", "event", "joke"}
-GROUP_KINDS = {"event", "joke"}
+KINDS = {"fact", "preference", "boundary", "state", "style", "event", "joke", "group_profile"}
+GROUP_KINDS = {"event", "joke", "group_profile"}
 logger = logging.getLogger(__name__)
+
+
+def normalized_content(text):
+    text = unicodedata.normalize("NFKC", text).casefold()
+    text = re.sub(r"(?<![a-z0-9])\.|\.(?![a-z0-9])", "", text)
+    return "".join(c for c in text if c in "#+.%_/-" or unicodedata.category(c)[0] not in {"P", "Z", "C"})
+
+
+def normalized_key(key, kind):
+    key = unicodedata.normalize("NFKC", key).casefold().replace(":", ".").replace("_", ".")
+    return key.removeprefix(kind + ".")
+
+
+def same_content(first, second):
+    a, b = normalized_content(first), normalized_content(second)
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 18:
+        return False
+    if min(len(a), len(b)) / max(len(a), len(b)) < 0.94:
+        return False
+    # Don't merge contrasting preferences or distinct dates/numbers on fuzzy similarity.
+    if re.findall(r"\d+", a) != re.findall(r"\d+", b):
+        return False
+    if re.findall(r"[a-z][a-z0-9_+#./-]*", a) != re.findall(r"[a-z][a-z0-9_+#./-]*", b):
+        return False
+    negatives = ("不", "没", "无", "别", "not", "never", "no")
+    if [w for w in negatives if w in a] != [w for w in negatives if w in b]:
+        return False
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return matcher.quick_ratio() >= 0.94 and matcher.ratio() >= 0.94
 
 
 def terms(text: str) -> set[str]:
@@ -33,7 +68,8 @@ def terms(text: str) -> set[str]:
 class MemoryStore:
     """Versioned SQLite store. No dependency on AstrBot, DSH, or conversation IDs."""
 
-    def __init__(self, data_dir: str | Path, *, clock=time.time, readable_background=False):
+    def __init__(self, data_dir: str | Path, *, clock=time.time, readable_background=False,
+                 max_person_memories=80, max_group_memories=160):
         self.directory = Path(data_dir).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "memory.sqlite3"
@@ -41,6 +77,15 @@ class MemoryStore:
         self.lock = threading.RLock()
         self.readable_background = readable_background
         self._readable_writer = None
+        self.max_person_memories = max(1, int(max_person_memories))
+        self.max_group_memories = max(1, int(max_group_memories))
+        self.prompt_path = self.directory / "summary_prompt.txt"
+        if not self.prompt_path.exists():
+            try:
+                with self.prompt_path.open("x", encoding="utf-8", newline="\n") as prompt:
+                    prompt.write(DEFAULT_SUMMARY_POLICY)
+            except FileExistsError:
+                pass
         with self.connection(sync_readable=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > 1:
@@ -60,6 +105,7 @@ class MemoryStore:
                     attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY(namespace, scope, message_id));
                 CREATE INDEX IF NOT EXISTS messages_pending ON messages(done, retry_at, received_at);
+                CREATE INDEX IF NOT EXISTS messages_scope_timeline ON messages(namespace,scope,received_at);
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY, namespace TEXT, scope TEXT, subject_id TEXT,
                     kind TEXT, key TEXT, content TEXT, evidence_ids TEXT,
@@ -73,8 +119,18 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS changes (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT,
                     action TEXT, timestamp REAL);
+                CREATE TABLE IF NOT EXISTS summary_runs (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT, scope TEXT,
+                    subject_id TEXT, finished_at REAL, messages INTEGER, written INTEGER,
+                    rejected INTEGER, outcome TEXT, error_type TEXT);
                 PRAGMA user_version=1;
             """)
+
+    def summary_prompt(self):
+        policy = self.prompt_path.read_text(encoding="utf-8-sig") if self.prompt_path.exists() else DEFAULT_SUMMARY_POLICY
+        if len(policy) > 16000:
+            raise ValueError("summary_prompt.txt exceeds 16000 characters")
+        return CONTRACT_PROMPT + "\n用户配置的整理策略：\n" + policy
 
     @contextmanager
     def connection(self, *, sync_readable=False):
@@ -153,24 +209,58 @@ class MemoryStore:
                         message.provider_id, message.timestamp, now))
             return True
 
-    def next_batch(self, *, delay: float, limit: int) -> dict | None:
+    def next_batch(self, *, delay: float, limit: int, mode="legacy", min_batch=1, max_wait=1800) -> dict | None:
         now = self.clock()
         with self.connection() as db:
-            row = db.execute("""SELECT namespace,scope,COUNT(*) AS n,MIN(received_at) AS first,
-                MAX(received_at) AS last FROM messages WHERE done=0 AND retry_at<=? AND attempts<3
-                GROUP BY namespace,scope HAVING last<=? OR n>=? OR first<=?
-                ORDER BY first LIMIT 1""", (now, now - delay, limit, now - max(delay * 3, 30))).fetchone()
+            if mode == "person":
+                row = db.execute("""SELECT namespace,scope,sender_id,COUNT(*) AS n,MIN(received_at) AS first,
+                    MAX(received_at) AS last FROM messages WHERE done=0 AND retry_at<=? AND attempts<3
+                    GROUP BY namespace,scope,sender_id
+                    HAVING n>=? OR (n>=? AND last<=?) OR first<=?
+                    OR MAX(text LIKE '记住%' OR text LIKE '更正%' OR text LIKE '纠正%' OR text LIKE '以后%')
+                    ORDER BY first LIMIT 1""", (now, limit, min_batch, now - delay, now - max_wait)).fetchone()
+            else:
+                row = db.execute("""SELECT namespace,scope,COUNT(*) AS n,MIN(received_at) AS first,
+                    MAX(received_at) AS last FROM messages WHERE done=0 AND retry_at<=? AND attempts<3
+                    GROUP BY namespace,scope HAVING last<=? OR n>=? OR first<=?
+                    ORDER BY first LIMIT 1""", (now, now - delay, limit, now - max(delay * 3, 30))).fetchone()
             if not row:
                 return None
             ns, scope = row["namespace"], row["scope"]
+            target_id = row["sender_id"] if mode == "person" else None
+            target_sql = " AND sender_id=?" if target_id else ""
+            params = [ns, scope, now] + ([target_id] if target_id else []) + [limit]
             messages = [dict(r) for r in db.execute("""SELECT message_id,sender_id,sender_name,text,provider_id,timestamp
-                FROM messages WHERE namespace=? AND scope=? AND done=0 AND retry_at<=? AND attempts<3
-                ORDER BY received_at,rowid LIMIT ?""", (ns, scope, now, limit))]
+                FROM messages WHERE namespace=? AND scope=? AND done=0 AND retry_at<=? AND attempts<3"""
+                + target_sql + " ORDER BY received_at,rowid LIMIT ?", params)]
             epoch = db.execute("SELECT epoch FROM scopes WHERE namespace=? AND scope=?", (ns, scope)).fetchone()[0]
             # Include old subjects/keys so corrections can update stable fields.
-            existing = [self.decode(r) for r in db.execute("""SELECT * FROM memories WHERE namespace=? AND scope=?
-                AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC LIMIT 60""", (ns, scope, now))]
-            return {"namespace": ns, "scope": scope, "epoch": epoch, "messages": messages, "existing": existing}
+            if target_id:
+                existing = [self.decode(r) for r in db.execute("""SELECT * FROM memories WHERE namespace=? AND scope=?
+                    AND (expires_at IS NULL OR expires_at>?) AND subject_id IN (?, '@group')
+                    ORDER BY (subject_id=?) DESC,updated_at DESC LIMIT 120""", (ns, scope, now, target_id, target_id))]
+            else:
+                existing = [self.decode(r) for r in db.execute("""SELECT * FROM memories WHERE namespace=? AND scope=?
+                    AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC LIMIT 60""", (ns, scope, now))]
+            recent_context = []
+            if target_id:
+                claimed = {message["message_id"] for message in messages}
+                budget = 12000
+                for source in db.execute("""SELECT message_id,sender_id,sender_name,text,provider_id,timestamp
+                    FROM messages m WHERE namespace=? AND scope=? AND NOT EXISTS
+                    (SELECT 1 FROM people p WHERE p.namespace=m.namespace AND p.scope=m.scope
+                     AND p.person_id=m.sender_id AND p.paused=1) ORDER BY received_at DESC,rowid DESC LIMIT 40""", (ns, scope)):
+                    if source["message_id"] in claimed:
+                        continue
+                    item = dict(source)
+                    item["text"] = item["text"][:1200]
+                    if len(item["text"]) > budget:
+                        continue
+                    recent_context.append(item)
+                    budget -= len(item["text"])
+                recent_context.reverse()
+            return {"namespace": ns, "scope": scope, "epoch": epoch, "target_id": target_id,
+                    "messages": messages, "recent_context": recent_context, "existing": existing}
 
     @staticmethod
     def decode(row) -> dict:
@@ -194,30 +284,74 @@ class MemoryStore:
         evidence = item.get("evidence_ids")
         if not isinstance(evidence, list) or not evidence or len(evidence) > 20 or not all(isinstance(e, str) for e in evidence):
             raise ValueError("Missing evidence")
-        sources = {m["message_id"]: m for m in batch["messages"]}
+        sources = {m["message_id"]: m for m in batch.get("recent_context", []) + batch["messages"]}
         if any(e not in sources for e in evidence):
             raise ValueError("Evidence is not in the observed batch")
         evidence = list(dict.fromkeys(evidence))
         participants = item.get("participant_ids", [])
         if not isinstance(participants, list) or len(participants) > 30 or not all(isinstance(p, str) for p in participants):
             raise ValueError("Invalid participants")
-        senders = {m["sender_id"] for m in batch["messages"]}
+        senders = {m["sender_id"] for m in sources.values()}
         if kind in GROUP_KINDS:
             if subject != "@group" or any(p not in senders for p in participants):
                 raise ValueError("Invalid group memory attribution")
             participants = sorted(set(participants) | {sources[e]["sender_id"] for e in evidence})
+            if kind == "group_profile" and len({sources[e]["sender_id"] for e in evidence}) < 2:
+                raise ValueError("A group profile needs evidence from two speakers")
         elif subject not in senders or any(sources[e]["sender_id"] != subject for e in evidence) or participants:
             raise ValueError("A personal fact must be evidenced by that person's own message")
+        elif batch.get("target_id") and subject != batch["target_id"]:
+            raise ValueError("A person batch can only update its target profile")
+        if kind == "style" and len(evidence) < 3:
+            raise ValueError("An interaction observation needs three distinct messages")
         ttl = item.get("ttl_days")
         if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 0 < ttl <= 3650):
             raise ValueError("Invalid expiry")
-        if kind == "state":
+        if kind in {"state", "style", "group_profile"}:
             ttl = min(ttl or 7, 30)
         elif kind in GROUP_KINDS:
             ttl = min(ttl or (60 if kind == "joke" else 90), 365)
         return {"kind": kind, "subject_id": subject, "key": key, "content": content.strip(),
                 "confidence": confidence, "evidence_ids": evidence, "participant_ids": participants,
-                "expires_at": now + ttl * 86400 if ttl else None}
+                "expires_at": now + ttl * 86400 if ttl else None, "update_id": item.get("update_id")}
+
+    def _match_existing(self, db, namespace, scope, item):
+        rows = list(db.execute("SELECT * FROM memories WHERE namespace=? AND scope=? AND subject_id=? AND kind=?",
+                               (namespace, scope, item["subject_id"], item["kind"])))
+        if item["update_id"]:
+            if not isinstance(item["update_id"], str):
+                raise ValueError("Invalid update_id")
+            match = next((row for row in rows if row["id"] == item["update_id"]), None)
+            if match is None:
+                raise ValueError("update_id does not belong to this subject, scope and type")
+            return match
+        for row in rows:
+            if normalized_key(row["key"], row["kind"]) == normalized_key(item["key"], item["kind"]):
+                return row
+        for row in rows:
+            if same_content(row["content"], item["content"]):
+                return row
+        return None
+
+    def _blocked(self, db, namespace, scope, item):
+        content_key = "@content:" + hashlib.sha256(normalized_content(item["content"]).encode()).hexdigest()
+        for row in db.execute("SELECT kind,key FROM blocks WHERE namespace=? AND scope=? AND subject_id=?",
+                              (namespace, scope, item["subject_id"])):
+            if row["kind"] == "*" and row["key"] == content_key:
+                return True
+            if row["kind"] == item["kind"] and normalized_key(row["key"], row["kind"]) == normalized_key(item["key"], item["kind"]):
+                return True
+        return False
+
+    def _cap_memories(self, db, namespace, scope):
+        subjects = [r[0] for r in db.execute("SELECT DISTINCT subject_id FROM memories WHERE namespace=? AND scope=?", (namespace, scope))]
+        for subject in subjects:
+            cap = self.max_group_memories if subject == "@group" else self.max_person_memories
+            rows = db.execute("""SELECT id FROM memories WHERE namespace=? AND scope=? AND subject_id=? AND kind!='boundary'
+                ORDER BY (kind='group_profile') DESC,updated_at DESC,rowid DESC LIMIT -1 OFFSET ?""", (namespace, scope, subject, cap))
+            for row in list(rows):
+                db.execute("DELETE FROM memories WHERE id=?", (row["id"],))
+                db.execute("DELETE FROM changes WHERE memory_id=?", (row["id"],))
 
     def apply_batch(self, batch: dict, candidates: list[dict]) -> tuple[int, int]:
         now = self.clock()
@@ -230,18 +364,22 @@ class MemoryStore:
             for candidate in candidates[:12]:
                 try:
                     item = self._candidate(candidate, batch, now)
+                    old = self._match_existing(db, ns, scope, item)
                 except (ValueError, TypeError):
                     rejected += 1
                     continue
-                if db.execute("SELECT 1 FROM blocks WHERE namespace=? AND scope=? AND subject_id=? AND kind=? AND key=?",
-                              (ns, scope, item["subject_id"], item["kind"], item["key"])).fetchone():
+                if old:
+                    item["key"] = old["key"]
+                if self._blocked(db, ns, scope, item):
                     rejected += 1
                     continue
                 memory_id = "m_" + uuid.uuid4().hex[:16]
-                old = db.execute("SELECT id FROM memories WHERE namespace=? AND scope=? AND subject_id=? AND kind=? AND key=?",
-                                 (ns, scope, item["subject_id"], item["kind"], item["key"])).fetchone()
                 if old:
-                    memory_id = old[0]
+                    memory_id = old["id"]
+                    # A correction drops old contradictory evidence; a duplicate reinforces it.
+                    if same_content(old["content"], item["content"]):
+                        item["evidence_ids"] = list(dict.fromkeys(json.loads(old["evidence_ids"]) + item["evidence_ids"]))[-20:]
+                    item["participant_ids"] = sorted(set(json.loads(old["participant_ids"])) | set(item["participant_ids"]))
                 db.execute("""INSERT INTO memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)
                     ON CONFLICT(namespace,scope,subject_id,kind,key) DO UPDATE SET
                     content=excluded.content,evidence_ids=excluded.evidence_ids,participant_ids=excluded.participant_ids,
@@ -251,16 +389,22 @@ class MemoryStore:
                             now, now, item["expires_at"]))
                 db.execute("INSERT INTO changes(memory_id,action,timestamp) VALUES(?,?,?)", (memory_id, "update" if old else "add", now))
                 written += 1
+            self._cap_memories(db, ns, scope)
             for message in batch["messages"]:
                 db.execute("UPDATE messages SET done=1 WHERE namespace=? AND scope=? AND message_id=?", (ns, scope, message["message_id"]))
+            outcome = "saved" if written else ("no_candidates" if not candidates else "validation_rejected")
+            db.execute("INSERT INTO summary_runs(namespace,scope,subject_id,finished_at,messages,written,rejected,outcome,error_type) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (ns, scope, batch.get("target_id"), now, len(batch["messages"]), written, rejected, outcome, ""))
         return written, rejected
 
-    def fail_batch(self, batch):
+    def fail_batch(self, batch, error_type=""):
         with self.connection() as db:
             for message in batch["messages"]:
                 db.execute("""UPDATE messages SET attempts=attempts+1,retry_at=? + 30 * (attempts+1)
                     WHERE namespace=? AND scope=? AND message_id=? AND done=0""",
                            (self.clock(), batch["namespace"], batch["scope"], message["message_id"]))
+            db.execute("INSERT INTO summary_runs(namespace,scope,subject_id,finished_at,messages,written,rejected,outcome,error_type) VALUES(?,?,?,?,?,0,0,'error',?)",
+                       (batch["namespace"], batch["scope"], batch.get("target_id"), self.clock(), len(batch["messages"]), error_type[:80]))
 
     def context(self, namespace, scope, sender_id, query, *, limit=8, char_budget=5000, cooldown=21600):
         now = self.clock()
@@ -283,22 +427,28 @@ class MemoryStore:
                 overlap += 2 * len(query_terms & person_terms.get(item["subject_id"], set()))
                 own = item["subject_id"] == sender_id
                 # Boundaries remain visible, but unrelated other-person information does not.
-                if not own and item["kind"] != "boundary" and not overlap:
+                if not own and item["kind"] not in {"boundary", "group_profile"} and not overlap:
                     continue
                 if item["kind"] == "joke" and item["last_used"] and now - item["last_used"] < cooldown:
                     continue
                 score = overlap * 3 + (5 if own else 0) + (100 if item["kind"] == "boundary" else 0)
+                if item["kind"] == "group_profile":
+                    score += 8
                 if own and item["kind"] in {"fact", "state"} and not overlap:
                     score -= 3
                 scored.append((score, item["updated_at"], item))
             selected = []
             used = 0
+            group_profiles = 0
             for _, _, item in sorted(scored, key=lambda x: (x[0], x[1]), reverse=True):
+                if item["kind"] == "group_profile" and group_profiles >= 2:
+                    continue
                 public = {k: item[k] for k in ("id", "subject_id", "kind", "content", "updated_at", "participant_ids")}
                 cost = len(json.dumps(public, ensure_ascii=False))
                 if used + cost > char_budget:
                     continue
                 selected.append(public)
+                group_profiles += item["kind"] == "group_profile"
                 used += cost
                 if item["kind"] == "joke":
                     db.execute("UPDATE memories SET last_used=? WHERE id=?", (now, item["id"]))
@@ -316,8 +466,20 @@ class MemoryStore:
             person = db.execute("SELECT * FROM people WHERE namespace=? AND scope=? AND person_id=?", (namespace, scope, person_id)).fetchone()
             memories = [self.decode(r) for r in db.execute("""SELECT * FROM memories WHERE namespace=? AND scope=?
                 AND subject_id=? AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC""", (namespace, scope, person_id, now))]
+            row = db.execute("""SELECT COUNT(*) AS retained,
+                COALESCE(SUM(done=1),0) AS processed,
+                COALESCE(SUM(done=0 AND attempts<3),0) AS pending,
+                COALESCE(SUM(done=0 AND attempts>=3),0) AS failed
+                FROM messages WHERE namespace=? AND scope=? AND sender_id=?""", (namespace, scope, person_id)).fetchone()
+            stats = dict(row)
+            stats["group_memories"] = db.execute("""SELECT COUNT(*) FROM memories WHERE namespace=? AND scope=?
+                AND subject_id='@group' AND (expires_at IS NULL OR expires_at>?)""", (namespace, scope, now)).fetchone()[0]
+            last = db.execute("""SELECT finished_at,messages,written,rejected,outcome,error_type FROM summary_runs
+                WHERE namespace=? AND scope=? AND subject_id=? ORDER BY seq DESC LIMIT 1""", (namespace, scope, person_id)).fetchone()
+            stats["last_summary"] = dict(last) if last else None
+            stats["personal_content_chars"] = sum(len(memory["content"]) for memory in memories)
             return {"person_id": person_id, "name": person["name"] if person else "", "paused": bool(person["paused"]) if person else False,
-                    "aliases": json.loads(person["aliases"]) if person else [], "memories": memories}
+                    "aliases": json.loads(person["aliases"]) if person else [], "memories": memories, "stats": stats}
 
     def _invalidate(self, db, namespace, scope):
         db.execute("INSERT OR IGNORE INTO scopes(namespace,scope) VALUES(?,?)", (namespace, scope))
@@ -331,10 +493,14 @@ class MemoryStore:
             if not row:
                 return False
             item = self.decode(row)
+            if item["kind"] == "group_profile" and not admin:
+                raise PermissionError("Group-wide profiles are managed by administrators")
             if not admin and requester_id != item["subject_id"] and requester_id not in item["participant_ids"]:
                 raise PermissionError("Only the subject, a participant, or an administrator may forget this memory")
             self._invalidate(db, namespace, scope)
             db.execute("INSERT OR IGNORE INTO blocks VALUES(?,?,?,?,?)", (namespace, scope, item["subject_id"], item["kind"], item["key"]))
+            content_key = "@content:" + hashlib.sha256(normalized_content(item["content"]).encode()).hexdigest()
+            db.execute("INSERT OR IGNORE INTO blocks VALUES(?,?,?,?,?)", (namespace, scope, item["subject_id"], "*", content_key))
             for source_id in item["evidence_ids"]:
                 db.execute("DELETE FROM messages WHERE namespace=? AND scope=? AND message_id=?", (namespace, scope, source_id))
             db.execute("DELETE FROM memories WHERE id=?", (memory_id,))
@@ -358,6 +524,7 @@ class MemoryStore:
                     db.execute("DELETE FROM changes WHERE memory_id=?", (mid,))
                 db.execute("DELETE FROM messages WHERE namespace=? AND scope=? AND sender_id=?", (namespace, scope, person_id))
                 db.execute("UPDATE people SET name='',aliases='[]' WHERE namespace=? AND scope=? AND person_id=?", (namespace, scope, person_id))
+                db.execute("DELETE FROM summary_runs WHERE namespace=? AND scope=? AND subject_id=?", (namespace, scope, person_id))
 
     def resume(self, namespace, scope, person_id):
         with self.connection(sync_readable=True) as db:
@@ -368,6 +535,7 @@ class MemoryStore:
             # Never delete a pending/retry job before its extraction has settled.
             db.execute("DELETE FROM messages WHERE (done=1 OR attempts>=3) AND received_at<?", (self.clock() - retention_days * 86400,))
             db.execute("DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at<=?", (self.clock(),))
+            db.execute("DELETE FROM summary_runs WHERE finished_at<?", (self.clock() - retention_days * 86400,))
 
     def backup(self) -> Path:
         destination = self.directory / ("backup-" + str(time.time_ns()) + ".sqlite3")

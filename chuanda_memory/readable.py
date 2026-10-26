@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LABELS = {"fact": "基本信息", "preference": "偏好", "boundary": "相处边界", "state": "近期状态",
-          "event": "共同经历", "joke": "群内梗"}
+          "style": "互动观察（有时效）", "event": "共同经历", "joke": "群内梗", "group_profile": "群整体记忆"}
 
 
 class CoalescingWriter:
@@ -78,7 +78,7 @@ def snapshot(db, now):
             scope["group_memories"].append(memory)
         else:
             people[(row["namespace"], row["scope"], row["subject_id"])]["memories"].append(memory)
-    for row in db.execute("SELECT * FROM blocks ORDER BY namespace,scope,subject_id,kind,key"):
+    for row in db.execute("SELECT * FROM blocks WHERE kind!='*' ORDER BY namespace,scope,subject_id,kind,key"):
         scopes[(row["namespace"], row["scope"])]["blocked_topics"].append({key: row[key] for key in ("subject_id", "kind", "key")})
     return {"format_version": 1, "database_schema_version": 1, "generation": uuid.uuid4().hex,
             "generated_at": timestamp(now), "scopes": list(scopes.values())}

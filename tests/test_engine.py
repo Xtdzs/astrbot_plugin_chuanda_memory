@@ -99,3 +99,28 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.02)
         release.set()
         await asyncio.wait_for(close, timeout=2)
+
+    async def test_one_background_call_updates_target_and_shared_memory_with_custom_policy(self):
+        self.store.prompt_path.write_text("优先记住有证据的交流偏好", encoding="utf-8")
+        for i in range(20):
+            self.store.observe(Observation("qq", "g1", "a" + str(i), "A", "成员A", "我喜欢简短的技术讨论"))
+        self.store.observe(Observation("qq", "g1", "b", "B", "成员B", "我也喜欢简短的技术讨论"))
+        calls = []
+        async def model(system, prompt, provider):
+            data = json.loads(prompt)
+            calls.append(data)
+            self.assertIn("优先记住有证据的交流偏好", system)
+            self.assertEqual(data["target_id"], "A")
+            self.assertEqual({m["sender_id"] for m in data["messages"]}, {"A"})
+            self.assertIn("B", {m["sender_id"] for m in data["recent_context"]})
+            return json.dumps({"memories": [
+                {"kind": "preference", "subject_id": "A", "key": "answer_length", "content": "喜欢简短的技术讨论",
+                 "evidence_ids": ["a0"], "confidence": 0.95},
+                {"kind": "group_profile", "subject_id": "@group", "key": "discussion", "content": "近期两位成员偏好简短的技术交流",
+                 "evidence_ids": ["a0", "b"], "confidence": 0.9}]})
+        engine = MemoryEngine(self.store, model, delay=300, min_batch=3)
+        self.assertTrue(await engine.run_once())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(self.store.profile("qq", "g1", "A")["memories"]), 1)
+        self.assertEqual(len(self.store.profile("qq", "g1", "@group")["memories"]), 1)
+        self.assertEqual(self.store.profile("qq", "g1", "B")["stats"]["pending"], 1)

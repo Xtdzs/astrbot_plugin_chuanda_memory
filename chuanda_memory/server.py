@@ -12,7 +12,7 @@ from .models import Observation, identifier
 from .store import MemoryStore
 
 
-def make_app(data_dir, token, model_call, *, delay=20, batch_size=16):
+def make_app(data_dir, token, model_call, *, delay=300, batch_size=20, min_batch=3, max_wait=1800):
     from aiohttp import web
 
     if not token or len(token) < 24:
@@ -32,7 +32,8 @@ def make_app(data_dir, token, model_call, *, delay=20, batch_size=16):
             return web.json_response({"error": "invalid_request"}, status=400)
 
     app = web.Application(middlewares=[auth], client_max_size=65536)
-    backend = LocalBackend(MemoryEngine(MemoryStore(data_dir, readable_background=True), model_call, delay=delay, batch_size=batch_size))
+    backend = LocalBackend(MemoryEngine(MemoryStore(data_dir, readable_background=True), model_call, delay=delay,
+                                        batch_size=batch_size, min_batch=min_batch, max_wait=max_wait))
     app[web.AppKey("backend", LocalBackend)] = backend
 
     async def lifecycle(app):
@@ -107,7 +108,8 @@ class OpenAIModel:
                 return json.loads(raw)["choices"][0]["message"]["content"]
 
 
-def serve(data_dir, host="127.0.0.1", port=8765, delay=20):
+def serve(data_dir, host="127.0.0.1", port=8765, delay=300, batch_size=20, min_batch=3, max_wait=1800):
     from aiohttp import web
-    app = make_app(data_dir, os.environ.get("CHUANDA_MEMORY_TOKEN", ""), OpenAIModel(), delay=delay)
+    app = make_app(data_dir, os.environ.get("CHUANDA_MEMORY_TOKEN", ""), OpenAIModel(), delay=delay,
+                   batch_size=batch_size, min_batch=min_batch, max_wait=max_wait)
     web.run_app(app, host=host, port=port, access_log=None)

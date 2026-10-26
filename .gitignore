@@ -13,3 +13,4 @@ build/
 memory.md
 memory.json
 .cdmem-*.tmp
+summary_prompt.txt
