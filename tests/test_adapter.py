@@ -137,6 +137,25 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.plugin.backend.store.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
+    async def test_blocked_group_status_returns_real_id_without_backend_or_llm(self):
+        plugin = self.module.ChuandaMemoryPlugin(self.host, {"allowed_groups": ["881612201"]})
+        event = Event(group="real-qq-group-openid", text="/cdmem status")
+        replies = [reply async for reply in plugin.memory_command(event, "status")]
+        self.assertTrue(event.stopped)
+        self.assertIn("Group ID: real-qq-group-openid", replies[0])
+        self.assertIn("group_not_allowed", replies[0])
+        self.assertIsNone(plugin.backend)
+        self.assertEqual(self.host.calls, [])
+
+    async def test_denied_commands_never_fall_through_to_chat(self):
+        for action in ["show", "clear", "forget", "help", "status"]:
+            plugin = self.module.ChuandaMemoryPlugin(self.host, {"enabled": False})
+            event = Event(text="/cdmem " + action)
+            replies = [reply async for reply in plugin.memory_command(event, action)]
+            self.assertTrue(event.stopped)
+            self.assertIn("plugin_disabled", replies[0])
+            self.assertIsNone(plugin.backend)
+
     async def test_background_model_does_not_use_agent_tools_or_history(self):
         await self.plugin._call_model("extract", "raw evidence", "provider1")
         self.assertIsNone(self.host.calls[0]["tools"])

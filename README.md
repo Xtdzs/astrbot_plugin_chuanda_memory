@@ -4,7 +4,7 @@
 
 **记忆独立于插件代码和聊天会话保存。日常后台更新不发送群消息，不播报“已更新记忆”。**
 
-这是可试用的 v0.2.0。自动化测试覆盖核心、AstrBot 适配层和真实本地 HTTP 服务；尚未完成真实 QQ 群、各类第三方 Agent runner 的端到端联调。
+这是可试用的 v0.2.1。自动化测试覆盖核心、AstrBot 适配层和真实本地 HTTP 服务；尚未完成真实 QQ 群、各类第三方 Agent runner 的端到端联调。
 
 ## 安装到 AstrBot
 
@@ -19,7 +19,7 @@ https://github.com/Xtdzs/astrbot_plugin_chuanda_memory
 也可以上传 [Releases](https://github.com/Xtdzs/astrbot_plugin_chuanda_memory/releases) 中的插件 ZIP。安装后在插件配置里：
 
 1. `mode` 保持 `local`，即可使用已有 AstrBot 模型后台整理，不需要另开服务。
-2. `allowed_groups` 填你们的群 ID。留空表示处理该机器人接收到的全部群。
+2. 先在群里发送 `/cdmem status`，把返回的 **Group ID** 填入 `allowed_groups`。QQ 官方接口返回的是群 **OpenID**，不能填数字 QQ 群号；留空表示处理接收到的全部群。
 3. `memory_provider_id` 可留空跟随会话模型，也可以填写已有的便宜模型提供商 ID。
 4. 已有自己的人格时关闭 `enable_chuanda_persona`。
 5. 群内发送 `/cdmem status` 检查身份与采集状态。

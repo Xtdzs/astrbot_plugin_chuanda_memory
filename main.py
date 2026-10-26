@@ -16,6 +16,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 
 from .chuanda_memory.client import RemoteBackend
+from .chuanda_memory import __version__
 from .chuanda_memory.engine import LocalBackend, MemoryEngine
 from .chuanda_memory.extraction import CONTEXT_RULES, PERSONA
 from .chuanda_memory.models import Observation, identity_namespace
@@ -155,9 +156,24 @@ class ChuandaMemoryPlugin(Star):
 
     @filter.command("cdmem")
     async def memory_command(self, event: AstrMessageEvent, action: str = "help", target: str = ""):
-        if not self._allowed(event):
-            return
         event.stop_event()
+        if not self._allowed(event):
+            group = str(event.get_group_id() or "")
+            if not self.config.get("enabled", True):
+                reason = "plugin_disabled"
+            elif group:
+                reason = "group_not_allowed"
+            else:
+                reason = "private_memory_disabled"
+            if action.casefold() in {"status", "help"}:
+                text = (f"CDMem: {__version__}\nPlatform: {event.get_platform_name()}\n"
+                        f"Group ID: {group or '(private)'}\nID: {event.get_sender_id()}\nCapture: blocked ({reason})\n"
+                        "本指令只显示当前事件身份，未读取或采集记忆。\n"
+                        "群未获准时，请把上面的 Group ID 填入 allowed_groups；QQ 官方接口使用 OpenID，不是 QQ 群号。")
+            else:
+                text = f"CDMem blocked ({reason}). Use /cdmem status."
+            yield event.plain_result(text)
+            return
         try:
             await self.initialize()
             ns, scope, sender = self._identity(event)
@@ -177,7 +193,8 @@ class ChuandaMemoryPlugin(Star):
                 text = "已清空当前范围内与你相关的记忆和来源消息，并暂停采集。用 /cdmem resume 恢复。"
             elif action == "status":
                 profile = await self.backend.profile(ns, scope, sender)
-                text = f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\nMemories: {len(profile['memories'])}"
+                text = (f"CDMem: {__version__}\nPlatform: {event.get_platform_name()}\nGroup ID: {event.get_group_id() or '(private)'}\n"
+                        f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\nMemories: {len(profile['memories'])}")
             elif action in {"show", "group"}:
                 subject = "@group" if action == "group" else (target or sender)
                 if subject != sender and action != "group" and not event.is_admin():

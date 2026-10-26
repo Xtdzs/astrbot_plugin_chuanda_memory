@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chuanda-memory"
-version = "0.2.0"
+version = "0.2.1"
 description = "Evidence-backed, identity-scoped group-chat memory with an AstrBot adapter"
 requires-python = ">=3.10"
 dependencies = ["aiohttp>=3.10,<4"]

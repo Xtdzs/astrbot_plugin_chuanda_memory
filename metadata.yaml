@@ -1,7 +1,7 @@
 name: astrbot_plugin_chuanda_memory
 display_name: 串大记忆
 desc: 按成员 ID 维护人物偏好、共同经历和群梗；独立 SQLite 数据，后台静默更新，可选独立记忆服务。
-version: v0.2.0
+version: v0.2.1
 author: Xtdzs
 repo: https://github.com/Xtdzs/astrbot_plugin_chuanda_memory
 astrbot_version: ">=4.24.0"
