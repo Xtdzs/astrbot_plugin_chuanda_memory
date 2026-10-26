@@ -32,7 +32,7 @@ def make_app(data_dir, token, model_call, *, delay=20, batch_size=16):
             return web.json_response({"error": "invalid_request"}, status=400)
 
     app = web.Application(middlewares=[auth], client_max_size=65536)
-    backend = LocalBackend(MemoryEngine(MemoryStore(data_dir), model_call, delay=delay, batch_size=batch_size))
+    backend = LocalBackend(MemoryEngine(MemoryStore(data_dir, readable_background=True), model_call, delay=delay, batch_size=batch_size))
     app[web.AppKey("backend", LocalBackend)] = backend
 
     async def lifecycle(app):

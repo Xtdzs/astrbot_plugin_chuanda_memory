@@ -10,3 +10,6 @@ dist/
 .coverage
 *.egg-info/
 build/
+memory.md
+memory.json
+.cdmem-*.tmp

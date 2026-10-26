@@ -146,11 +146,42 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_clear_is_scoped_and_stops_chat_pipeline(self):
         event = Event()
         await self.plugin.observe_message(event)
-        replies = [reply async for reply in self.plugin.memory_command(event, "清空")]
+        replies = [reply async for reply in self.plugin.memory_command(event, "clear")]
         self.assertTrue(event.stopped)
         self.assertEqual(len(replies), 1)
         ns, scope, sender = self.plugin._identity(event)
         self.assertTrue((await self.plugin.backend.profile(ns, scope, sender))["paused"])
+
+    async def test_english_status_pause_resume_and_help(self):
+        event = Event(text="/cdmem status")
+        replies = [reply async for reply in self.plugin.memory_command(event, "status")]
+        self.assertIn("ID: 1001", replies[0])
+        self.assertIn("Capture: active", replies[0])
+        await self.plugin.observe_message(event)
+        with self.plugin.backend.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+        replies = [reply async for reply in self.plugin.memory_command(event, "pause")]
+        replies = [reply async for reply in self.plugin.memory_command(event, "status")]
+        self.assertIn("Capture: paused", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(event, "resume")]
+        replies = [reply async for reply in self.plugin.memory_command(event)]
+        self.assertIn("/cdmem forget <memory_id>", replies[0])
+
+    async def test_english_forget_checks_permission_and_missing_argument(self):
+        await self.plugin.observe_message(Event())
+        store = self.plugin.backend.store
+        batch = store.next_batch(delay=0, limit=16)
+        store.apply_batch(batch, [{"kind": "preference", "subject_id": "1001", "key": "language", "content": "喜欢 Rust",
+                                   "evidence_ids": ["m1"], "confidence": 0.9}])
+        ns, scope, sender = self.plugin._identity(Event())
+        memory_id = store.profile(ns, scope, sender)["memories"][0]["id"]
+        replies = [reply async for reply in self.plugin.memory_command(Event(sender="1002"), "forget", memory_id)]
+        self.assertIn("只能删除与你相关", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "forget")]
+        self.assertEqual(replies[0], "Usage: /cdmem forget <memory_id>")
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "forget", memory_id)]
+        self.assertIn("已删除", replies[0])
+        self.assertFalse(store.profile(ns, scope, sender)["memories"])
 
     async def test_message_to_background_memory_to_next_request(self):
         async def model(**kwargs):

@@ -7,3 +7,6 @@ dist
 __pycache__
 *.sqlite3*
 *.db*
+memory.md
+memory.json
+.cdmem-*.tmp

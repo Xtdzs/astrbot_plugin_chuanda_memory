@@ -47,7 +47,7 @@ class ChuandaMemoryPlugin(Star):
                 source = Path(__file__).resolve().parent
                 if directory == source or source in directory.parents:
                     raise ValueError("记忆目录不能位于插件代码目录内，请选择外置数据目录")
-                store = await asyncio.to_thread(MemoryStore, directory)
+                store = await asyncio.to_thread(MemoryStore, directory, readable_background=True)
                 await asyncio.to_thread(store.prune, int(self.config.get("raw_retention_days", 14)))
                 engine = MemoryEngine(store, self._call_model, delay=float(self.config.get("batch_delay_seconds", 20)),
                                       batch_size=int(self.config.get("batch_size", 16)),
@@ -95,7 +95,8 @@ class ChuandaMemoryPlugin(Star):
         if cached is not None:
             return cached
         text = event.get_message_str().strip()
-        if not text or text.lstrip("/").startswith(("串大记忆", "串大忘记")):
+        command = text.lstrip("/").split(maxsplit=1)[0].casefold() if text else ""
+        if not text or command in {"cdmem", "串大记忆", "串大忘记"}:
             return None
         # Keep only top-level plain text. Quotes/forwarded messages are not self-report evidence.
         plain = [part.text for part in event.get_messages() if getattr(part, "type", "") == "Plain"]
@@ -152,59 +153,58 @@ class ChuandaMemoryPlugin(Star):
             # A broken memory service must never block ordinary QQ replies.
             logger.warning("串大记忆召回暂不可用，继续正常回复：%s", type(exc).__name__)
 
-    @filter.command("串大记忆")
-    async def memory_command(self, event: AstrMessageEvent, action: str = "查看", target: str = ""):
+    @filter.command("cdmem")
+    async def memory_command(self, event: AstrMessageEvent, action: str = "help", target: str = ""):
         if not self._allowed(event):
             return
         event.stop_event()
         try:
             await self.initialize()
             ns, scope, sender = self._identity(event)
-            if action == "帮助":
-                text = "串大记忆：查看 / 群梗 / 状态 / 暂停 / 开启 / 清空 / 帮助。\n用 /串大忘记 记忆编号 删除一条；清空会删除当前聊天范围内与你相关的记忆并暂停采集。"
-            elif action == "暂停":
+            action = action.casefold()
+            if action == "help":
+                text = ("/cdmem status\n/cdmem show [user_id]\n/cdmem group\n"
+                        "/cdmem pause\n/cdmem resume\n/cdmem clear\n/cdmem forget <memory_id>\n"
+                        "show 默认查看自己，其他用户档案仅管理员可看。clear 清空当前范围内与你相关的记忆并暂停采集。")
+            elif action == "pause":
                 await self.backend.pause(ns, scope, sender)
-                text = "已暂停当前聊天范围内对你的记忆采集。已有记忆保留；用“串大记忆 开启”恢复。"
-            elif action == "开启":
+                text = "已暂停当前范围内对你的记忆采集。用 /cdmem resume 恢复。"
+            elif action == "resume":
                 await self.backend.resume(ns, scope, sender)
-                text = "已恢复当前聊天范围内对你的记忆采集。"
-            elif action == "清空":
+                text = "已恢复当前范围内对你的记忆采集。"
+            elif action == "clear":
                 await self.backend.pause(ns, scope, sender, erase=True)
-                text = "已清空当前聊天范围内与你相关的记忆和来源消息，并暂停采集。用“串大记忆 开启”恢复。"
-            elif action == "状态":
+                text = "已清空当前范围内与你相关的记忆和来源消息，并暂停采集。用 /cdmem resume 恢复。"
+            elif action == "status":
                 profile = await self.backend.profile(ns, scope, sender)
-                text = f"你的 ID：{sender}\n当前范围：{scope}\n采集：{'暂停' if profile['paused'] else '开启'}\n有效人物记忆：{len(profile['memories'])} 条"
-            elif action in {"查看", "群梗"}:
-                subject = "@group" if action == "群梗" else (target or sender)
-                if subject != sender and action != "群梗" and not event.is_admin():
+                text = f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\nMemories: {len(profile['memories'])}"
+            elif action in {"show", "group"}:
+                subject = "@group" if action == "group" else (target or sender)
+                if subject != sender and action != "group" and not event.is_admin():
                     text = "这里只能查看你自己的档案。"
                 else:
                     profile = await self.backend.profile(ns, scope, subject)
                     rows = [f"{m['id']} [{m['kind']}] {m['content'][:180]}" for m in profile["memories"][:15]]
                     text = "\n".join(rows) if rows else "当前聊天范围内还没有这个人的有效人物记忆。"
+            elif action == "forget":
+                if not target:
+                    text = "Usage: /cdmem forget <memory_id>"
+                else:
+                    text = await self._forget_text(event, target)
             else:
-                text = "可用操作：查看、群梗、状态、暂停、开启、清空、帮助。"
+                text = "Unknown command. Use /cdmem help."
         except Exception as exc:
             logger.warning("串大记忆管理失败：%s", type(exc).__name__)
             text = "记忆服务暂时不可用，请稍后再试。"
         yield event.plain_result(text)
 
-    @filter.command("串大忘记")
-    async def forget_command(self, event: AstrMessageEvent, memory_id: str):
-        if not self._allowed(event):
-            return
-        event.stop_event()
+    async def _forget_text(self, event: AstrMessageEvent, memory_id: str):
         try:
-            await self.initialize()
             ns, scope, sender = self._identity(event)
             deleted = await self.backend.forget(ns, scope, sender, memory_id, admin=event.is_admin())
-            text = "已删除这条记忆，并阻止同主题自动重新写入。" if deleted else "当前聊天范围内没有这条记忆。"
+            return "已删除这条记忆，并阻止同主题自动重新写入。" if deleted else "当前聊天范围内没有这条记忆。"
         except PermissionError:
-            text = "只能删除与你相关的记忆；其他记忆由 AstrBot 管理员管理。"
-        except Exception as exc:
-            logger.warning("串大记忆删除失败：%s", type(exc).__name__)
-            text = "记忆服务暂时不可用，请稍后再试。"
-        yield event.plain_result(text)
+            return "只能删除与你相关的记忆；其他记忆由 AstrBot 管理员管理。"
 
     async def terminate(self):
         self._closed = True

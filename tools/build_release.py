@@ -4,15 +4,15 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ["main.py", "__init__.py", "metadata.yaml", "_conf_schema.json", "requirements.txt", "README.md", "LICENSE"]
+VERSION = next(line.split('"')[1] for line in (ROOT / "chuanda_memory/__init__.py").read_text(encoding="utf-8").splitlines() if line.startswith("__version__"))
+FILES = ["main.py", "__init__.py", "metadata.yaml", "_conf_schema.json", "requirements.txt", "README.md", "LICENSE", "docs/service.md"]
 
 
 def build():
-    output = ROOT / "dist" / "astrbot_plugin_chuanda_memory-v0.1.0.zip"
+    output = ROOT / "dist" / f"astrbot_plugin_chuanda_memory-v{VERSION}.zip"
     output.parent.mkdir(exist_ok=True)
     paths = [ROOT / name for name in FILES]
     paths += sorted((ROOT / "chuanda_memory").glob("*.py"))
-    paths += sorted((ROOT / "docs").glob("*.md"))
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in paths:
             relative = path.relative_to(ROOT).as_posix()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -11,9 +12,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Observation
+from .readable import CoalescingWriter, snapshot, write_views
 
 KINDS = {"fact", "preference", "boundary", "state", "event", "joke"}
 GROUP_KINDS = {"event", "joke"}
+logger = logging.getLogger(__name__)
 
 
 def terms(text: str) -> set[str]:
@@ -30,13 +33,15 @@ def terms(text: str) -> set[str]:
 class MemoryStore:
     """Versioned SQLite store. No dependency on AstrBot, DSH, or conversation IDs."""
 
-    def __init__(self, data_dir: str | Path, *, clock=time.time):
+    def __init__(self, data_dir: str | Path, *, clock=time.time, readable_background=False):
         self.directory = Path(data_dir).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "memory.sqlite3"
         self.clock = clock
         self.lock = threading.RLock()
-        with self.connection() as db:
+        self.readable_background = readable_background
+        self._readable_writer = None
+        with self.connection(sync_readable=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > 1:
                 raise RuntimeError("Memory database is newer than this program; refusing to downgrade")
@@ -72,7 +77,7 @@ class MemoryStore:
             """)
 
     @contextmanager
-    def connection(self):
+    def connection(self, *, sync_readable=False):
         with self.lock:
             db = sqlite3.connect(self.path, timeout=10)
             db.row_factory = sqlite3.Row
@@ -81,12 +86,51 @@ class MemoryStore:
                 db.execute("PRAGMA busy_timeout=10000")
                 with db:
                     yield db
+                if sync_readable:
+                    self._sync_readable(db)
             finally:
                 db.close()
 
+    def _sync_readable(self, db):
+        if self.readable_background:
+            if self._readable_writer is None:
+                self._readable_writer = CoalescingWriter(self._write_readable)
+            self._readable_writer.notify()
+        else:
+            self._write_readable()
+
+    def _write_readable(self):
+        try:
+            # WAL reader has its own connection: rendering/fsync never holds the message-path lock.
+            reader = sqlite3.connect(self.path, timeout=10)
+            try:
+                reader.row_factory = sqlite3.Row
+                reader.execute("PRAGMA query_only=ON")
+                reader.execute("BEGIN")
+                data = snapshot(reader, self.clock())
+            finally:
+                reader.close()
+            write_views(self.directory, data)
+        except (OSError, sqlite3.Error) as exc:
+            # The DB commit already succeeded. Retry on the next update or restart.
+            logger.warning("Chuanda readable memory sync deferred (%s)", type(exc).__name__)
+
+    def export_readable(self):
+        """Rebuild both views from SQLite; never imports user edits into memory."""
+        if self._readable_writer:
+            self._readable_writer.flush()
+        else:
+            self._write_readable()
+        return self.directory / "memory.md", self.directory / "memory.json"
+
+    def close(self):
+        if self._readable_writer:
+            self._readable_writer.close()
+            self._readable_writer = None
+
     def observe(self, message: Observation) -> bool:
         now = self.clock()
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             db.execute("INSERT OR IGNORE INTO scopes(namespace,scope) VALUES(?,?)", (message.namespace, message.scope))
             row = db.execute("SELECT * FROM people WHERE namespace=? AND scope=? AND person_id=?",
                              (message.namespace, message.scope, message.sender_id)).fetchone()
@@ -179,7 +223,7 @@ class MemoryStore:
         now = self.clock()
         written = rejected = 0
         ns, scope = batch["namespace"], batch["scope"]
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             epoch = db.execute("SELECT epoch FROM scopes WHERE namespace=? AND scope=?", (ns, scope)).fetchone()
             if not epoch or epoch[0] != batch["epoch"]:
                 return 0, len(candidates)  # Forget/pause invalidates in-flight model results.
@@ -282,7 +326,7 @@ class MemoryStore:
         db.execute("UPDATE messages SET done=1 WHERE namespace=? AND scope=?", (namespace, scope))
 
     def forget(self, namespace, scope, requester_id, memory_id, *, admin=False):
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             row = db.execute("SELECT * FROM memories WHERE namespace=? AND scope=? AND id=?", (namespace, scope, memory_id)).fetchone()
             if not row:
                 return False
@@ -298,7 +342,7 @@ class MemoryStore:
             return True
 
     def pause(self, namespace, scope, person_id, *, erase=False):
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             self._invalidate(db, namespace, scope)
             db.execute("""INSERT INTO people VALUES(?,?,?,'','[]',1,?) ON CONFLICT(namespace,scope,person_id)
                 DO UPDATE SET paused=1""", (namespace, scope, person_id, self.clock()))
@@ -316,11 +360,11 @@ class MemoryStore:
                 db.execute("UPDATE people SET name='',aliases='[]' WHERE namespace=? AND scope=? AND person_id=?", (namespace, scope, person_id))
 
     def resume(self, namespace, scope, person_id):
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             db.execute("UPDATE people SET paused=0 WHERE namespace=? AND scope=? AND person_id=?", (namespace, scope, person_id))
 
     def prune(self, retention_days=14):
-        with self.connection() as db:
+        with self.connection(sync_readable=True) as db:
             # Never delete a pending/retry job before its extraction has settled.
             db.execute("DELETE FROM messages WHERE (done=1 OR attempts>=3) AND received_at<?", (self.clock() - retention_days * 86400,))
             db.execute("DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at<=?", (self.clock(),))

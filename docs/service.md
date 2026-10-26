@@ -89,3 +89,7 @@ python -m chuanda_memory profile --data-dir /srv/chuanda-memory \
   --namespace '["aiocqhttp","my-adapter-id","my-bot-id"]' \
   --scope group:123456 --person-id 12345
 ```
+
+## 本地查看副本
+
+独立服务同样在 `--data-dir` 目录维护 `memory.md` 和 `memory.json`。导出使用独立后台线程和只读 WAL 快照，约0.5秒合并多次更新，不让 HTTP 消息请求等待文件写入。SQLite 为事实来源；重启会自动重建副本，删除会在下一轮后台同步移除副本中的内容。

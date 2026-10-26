@@ -21,4 +21,4 @@ class DistributionTests(unittest.TestCase):
                     compile(archive.read(name), name, "exec")
             schema = json.loads(archive.read("_conf_schema.json"))
             self.assertEqual(schema["mode"]["default"], "local")
-            self.assertIn("v0.1.0", archive.read("metadata.yaml").decode())
+            self.assertIn("v" + builder.VERSION, archive.read("metadata.yaml").decode())

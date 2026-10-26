@@ -135,3 +135,4 @@ class LocalBackend:
 
     async def close(self):
         await self.engine.close()
+        await settled_thread_call(self.store.close)

@@ -14,6 +14,8 @@ def main():
     server.add_argument("--delay", type=float, default=20)
     backup = sub.add_parser("backup")
     backup.add_argument("--data-dir", required=True)
+    export = sub.add_parser("export", help="Rebuild local memory.md and memory.json from SQLite")
+    export.add_argument("--data-dir", required=True)
     profile = sub.add_parser("profile")
     for name in ("data-dir", "namespace", "scope", "person-id"):
         profile.add_argument("--" + name, required=True)
@@ -23,6 +25,9 @@ def main():
         serve(args.data_dir, args.host, args.port, args.delay)
     elif args.command == "backup":
         print(MemoryStore(args.data_dir).backup())
+    elif args.command == "export":
+        for path in MemoryStore(args.data_dir).export_readable():
+            print(path)
     elif args.command == "profile":
         print(json.dumps(MemoryStore(args.data_dir).profile(args.namespace, args.scope, args.person_id), ensure_ascii=False, indent=2))
 
