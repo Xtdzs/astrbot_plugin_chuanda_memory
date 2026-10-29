@@ -20,6 +20,8 @@
   "context_char_budget": {"description": "召回资料字符预算", "type": "int", "default": 5000},
   "joke_cooldown_hours": {"description": "同一梗召回冷却小时数", "type": "int", "default": 6},
   "raw_retention_days": {"description": "已处理原始消息保留天数", "type": "int", "default": 14},
+  "automatic_backups": {"description": "每天自动备份记忆库和总结策略", "type": "bool", "default": true},
+  "backup_keep_days": {"description": "自动备份保留天数", "type": "int", "default": 7, "hint": "支持1–90天；仅轮换 backups/auto-*，手动备份不受影响。备份可能保留已删除记忆。"},
   "service_url": {"description": "独立服务地址", "type": "string", "default": "http://127.0.0.1:8765"},
   "service_token": {"description": "独立服务访问令牌", "type": "string", "default": "", "hint": "remote 模式必填至少24字符；也可通过 CHUANDA_MEMORY_TOKEN 环境变量设置。"},
   "service_timeout_seconds": {"description": "独立服务请求超时秒数", "type": "int", "default": 3}

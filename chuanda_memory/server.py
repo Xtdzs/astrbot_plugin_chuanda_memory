@@ -70,9 +70,17 @@ def make_app(data_dir, token, model_call, *, delay=300, batch_size=20, min_batch
                 raise ValueError("Invalid erase flag")
             await backend.pause(ns, scope, sender, erase=payload.get("erase", False))
             result = {"ok": True}
+        elif action == "pin":
+            if not isinstance(payload.get("admin", False), bool) or not isinstance(payload.get("permanent", True), bool):
+                raise ValueError("Invalid pin flags")
+            result = {"updated": await backend.pin(ns, scope, sender,
+                      identifier(payload.get("memory_id"), "memory_id"),
+                      permanent=payload.get("permanent", True), admin=payload.get("admin", False))}
         elif action == "resume":
             await backend.resume(ns, scope, sender)
             result = {"ok": True}
+        elif action == "retry":
+            result = {"requeued": await backend.retry_pending(ns, scope, sender)}
         else:
             raise web.HTTPNotFound()
         return web.json_response(result)

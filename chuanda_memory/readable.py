@@ -68,11 +68,14 @@ def snapshot(db, now):
                   "paused": bool(row["paused"]), "memories": []}
         scopes[(row["namespace"], row["scope"])]["people"].append(person)
         people[(row["namespace"], row["scope"], row["person_id"])] = person
-    for row in db.execute("""SELECT * FROM memories WHERE expires_at IS NULL OR expires_at>?
+    for row in db.execute("""SELECT * FROM memory_details WHERE expires_at IS NULL OR expires_at>?
         ORDER BY namespace,scope,subject_id,kind,key,id""", (now,)):
         memory = {key: row[key] for key in ("id", "subject_id", "kind", "key", "content", "confidence", "created_at", "updated_at", "expires_at")}
         memory["evidence_ids"] = json.loads(row["evidence_ids"])
         memory["participant_ids"] = json.loads(row["participant_ids"])
+        memory["importance"] = row["importance"]
+        memory["core"] = bool(row["core"])
+        memory["pinned"] = row["pinned"] == 1
         scope = scopes[(row["namespace"], row["scope"])]
         if row["subject_id"] == "@group":
             scope["group_memories"].append(memory)
@@ -92,6 +95,7 @@ def markdown(data):
             lines.extend(["暂无有效记忆。", ""])
         for memory in items:
             lines.extend([f"- **{LABELS.get(memory['kind'], md(memory['kind']))}**：{md(memory['content'])}",
+                          f"  - 保留策略：{'永久核心' if memory.get('core') else '普通'}；重要性：{memory.get('importance', 3)}/5",
                           f"  - ID：{md(memory['id'])}；主题：{md(memory['key'])}；置信度：{memory['confidence']:g}",
                           f"  - 更新时间：{timestamp(memory['updated_at'])}；有效期至：{timestamp(memory['expires_at'])}",
                           f"  - 来源消息 ID：{', '.join(md(e) for e in memory['evidence_ids'])}"])

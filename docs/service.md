@@ -53,6 +53,8 @@ Compose 将记忆写到命名持久卷，宿主端口只绑定 `127.0.0.1`。更
 | `POST /v1/forget` | namespace, scope, sender_id, memory_id；可选 admin:boolean | deleted |
 | `POST /v1/pause` | namespace, scope, sender_id；可选 erase:boolean | ok |
 | `POST /v1/resume` | namespace, scope, sender_id | ok |
+| `POST /v1/retry` | namespace, scope, sender_id | requeued（只重新排队该人的失败任务） |
+| `POST /v1/pin` | namespace, scope, sender_id, memory_id, permanent=true, admin=false | updated（permanent=false 取消核心保护；权限由可信适配层提供） |
 
 `@group` 为群体记忆的保留主体，不可作为消息发送者。读取当前范围的共同事件可向 profile 传 `sender_id: "@group"`。API v1 不接受客户端传入候选记忆或直接写任意人物事实，后台模型输出统一经过校验。
 
@@ -97,3 +99,5 @@ python -m chuanda_memory profile --data-dir /srv/chuanda-memory \
 ## v0.3 分批与策略
 
 服务默认按成员20条批量整理；至少3条、空闲300秒可提前处理，最长1800秒兜底。可用 `--batch-size`、`--delay`、`--min-batch`、`--max-wait` 修改。每次总结同时参考同群上下文，生成个人与群整体记忆。数据目录中的 `summary_prompt.txt` 可以编辑，后台下一次读取；API profile 增加 stats 字段以区分消息进度和长期记忆。旧数据库保留，新增辅助统计表，不改已有记忆字段。
+
+v0.3.1 中，失败任务指数退避重试，最长间隔6小时；未处理原文不会因失败次数或保留期限自动删除。profile 的 pending 为全部未处理数，retrying/failed 是其中的子集。旧批次在删除或暂停后仍失效，无关成员队列保留。后台每小时维护，并在数据目录 backups/ 内默认保留7天每日数据库和总结策略备份；手动备份不参与轮换。恢复备份前应核对是否会恢复此前已删除的内容。

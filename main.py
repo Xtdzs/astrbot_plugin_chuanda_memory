@@ -57,7 +57,9 @@ class ChuandaMemoryPlugin(Star):
                                       min_batch=int(self.config.get("person_idle_min_messages", 3)),
                                       max_wait=float(self.config.get("person_max_wait_seconds", 1800)),
                                       timeout=float(self.config.get("extraction_timeout_seconds", 45)),
-                                      retention_days=int(self.config.get("raw_retention_days", 14)))
+                                      retention_days=int(self.config.get("raw_retention_days", 14)),
+                                      automatic_backups=bool(self.config.get("automatic_backups", True)),
+                                      backup_keep_days=int(self.config.get("backup_keep_days", 7)))
                 self.backend = LocalBackend(engine, recall_limit=int(self.config.get("recall_limit", 8)),
                                             char_budget=int(self.config.get("context_char_budget", 5000)),
                                             cooldown=float(self.config.get("joke_cooldown_hours", 6)) * 3600)
@@ -184,7 +186,8 @@ class ChuandaMemoryPlugin(Star):
             action = action.casefold()
             if action == "help":
                 text = ("/cdmem status\n/cdmem show [user_id]\n/cdmem group\n/cdmem prompt (admin)\n"
-                        "/cdmem pause\n/cdmem resume\n/cdmem clear\n/cdmem forget <memory_id>\n"
+                        "/cdmem pause\n/cdmem resume\n/cdmem retry\n/cdmem clear\n/cdmem forget <memory_id>\n"
+                        "/cdmem pin <memory_id>\n/cdmem unpin <memory_id>\n"
                         "show 默认查看自己，其他用户档案仅管理员可看。clear 清空当前范围内与你相关的记忆并暂停采集。")
             elif action == "pause":
                 await self.backend.pause(ns, scope, sender)
@@ -192,6 +195,9 @@ class ChuandaMemoryPlugin(Star):
             elif action == "resume":
                 await self.backend.resume(ns, scope, sender)
                 text = "已恢复当前范围内对你的记忆采集。"
+            elif action == "retry":
+                count = await self.backend.retry_pending(ns, scope, sender)
+                text = f"已重新排队 {count} 条你的失败消息，后台稍后整理。"
             elif action == "clear":
                 await self.backend.pause(ns, scope, sender, erase=True)
                 text = "已清空当前范围内与你相关的记忆和来源消息，并暂停采集。用 /cdmem resume 恢复。"
@@ -200,9 +206,12 @@ class ChuandaMemoryPlugin(Star):
                 stats = profile.get("stats", {})
                 text = (f"CDMem: {__version__}\nPlatform: {event.get_platform_name()}\nGroup ID: {event.get_group_id() or '(private)'}\n"
                         f"ID: {sender}\nScope: {scope}\nCapture: {'paused' if profile['paused'] else 'active'}\n"
-                        f"Personal memories: {len(profile['memories'])}\nGroup memories: {stats.get('group_memories', 0)}\n"
+                        f"Personal memories: {len(profile['memories'])}\nCore memories: {stats.get('core_memories', 0)}\nGroup memories: {stats.get('group_memories', 0)}\n"
                         f"Messages (retained): {stats.get('retained', 0)}\nProcessed: {stats.get('processed', 0)}\n"
-                        f"Pending: {stats.get('pending', 0)}\nFailed: {stats.get('failed', 0)}")
+                        f"Pending: {stats.get('pending', 0)}\nRetrying: {stats.get('retrying', 0)}\nRepeated failures: {stats.get('failed', 0)}")
+                if stats.get("oldest_pending_at") is not None:
+                    age = max(0, int(time.time() - stats["oldest_pending_at"]))
+                    text += f"\nOldest pending: {age}s"
                 last = stats.get("last_summary")
                 if last:
                     text += f"\nLast summary: {last['outcome']} (saved={last['written']}, rejected={last['rejected']})"
@@ -222,8 +231,21 @@ class ChuandaMemoryPlugin(Star):
                     text = "这里只能查看你自己的档案。"
                 else:
                     profile = await self.backend.profile(ns, scope, subject)
-                    rows = [f"{m['id']} [{m['kind']}] {m['content'][:180]}" for m in profile["memories"][:15]]
+                    rows = [f"{m['id']} [{m['kind']}{'/core' if m.get('core') else ''}] {m['content'][:180]}" for m in profile["memories"][:15]]
                     text = "\n".join(rows) if rows else "当前聊天范围内还没有这个人的有效人物记忆。"
+            elif action in {"pin", "unpin"}:
+                if not target:
+                    text = f"Usage: /cdmem {action} <memory_id>"
+                else:
+                    try:
+                        updated = await self.backend.pin(ns, scope, sender, target,
+                                                         permanent=action == "pin", admin=event.is_admin())
+                        text = ("已设为永久核心记忆，仍可纠正或删除。" if action == "pin" else
+                                "已取消核心保留，按普通记忆规则维护。") if updated else "没有这条有效记忆。"
+                    except PermissionError:
+                        text = "只能设置自己的记忆；群共同记忆和他人记忆由管理员管理。"
+                    except ValueError:
+                        text = "只能固定事实、偏好、共同经历或梗；临时状态和表达观察不能永久化，相处边界已有独立保护。"
             elif action == "forget":
                 if not target:
                     text = "Usage: /cdmem forget <memory_id>"

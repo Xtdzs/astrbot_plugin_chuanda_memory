@@ -7,6 +7,7 @@ except ImportError:
     TestClient = TestServer = None
 
 from chuanda_memory.client import RemoteBackend
+from chuanda_memory.engine import LocalBackend
 from chuanda_memory.models import Observation
 from chuanda_memory.server import make_app
 from tests.support import temporary_directory
@@ -50,6 +51,24 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
         response = await self.client.post("/v1/observe", headers=self.headers, json={
             "namespace": "qq", "scope": "g1", "message_id": "m1", "sender_id": "@group", "sender_name": "x", "text": "fake"})
+        self.assertEqual(response.status, 400)
+
+    async def test_remote_pin_roundtrip_and_flags_are_validated(self):
+        remote = RemoteBackend(str(self.client.make_url("/")), self.token)
+        local = next(value for value in self.app.values() if isinstance(value, LocalBackend))
+        await remote.observe(Observation("qq", "g1", "m1", "A", "A同学", "我喜欢 Rust"))
+        local.store.apply_batch(local.store.next_batch(delay=0, limit=20), [dict(kind="preference", subject_id="A",
+            key="language", content="喜欢 Rust", evidence_ids=["m1"], confidence=0.9)])
+        memory_id = (await remote.profile("qq", "g1", "A"))["memories"][0]["id"]
+        self.assertTrue(await remote.pin("qq", "g1", "A", memory_id))
+        self.assertTrue((await remote.profile("qq", "g1", "A"))["memories"][0]["core"])
+        self.assertTrue(await remote.pin("qq", "g1", "A", memory_id, permanent=False))
+        self.assertFalse((await remote.profile("qq", "g1", "A"))["memories"][0]["core"])
+        response = await self.client.post("/v1/pin", headers=self.headers, json=dict(
+            namespace="qq", scope="g1", sender_id="B", memory_id=memory_id))
+        self.assertEqual(response.status, 403)
+        response = await self.client.post("/v1/pin", headers=self.headers, json=dict(
+            namespace="qq", scope="g1", sender_id="A", memory_id=memory_id, permanent="false"))
         self.assertEqual(response.status, 400)
 
     async def test_unknown_action_and_payload_limit(self):

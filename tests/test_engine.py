@@ -124,3 +124,27 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.profile("qq", "g1", "A")["memories"]), 1)
         self.assertEqual(len(self.store.profile("qq", "g1", "@group")["memories"]), 1)
         self.assertEqual(self.store.profile("qq", "g1", "B")["stats"]["pending"], 1)
+
+    async def test_idle_worker_runs_backup_and_expiry_maintenance_without_model_calls(self):
+        now = [1_800_000_000.0]
+        self.store.clock = lambda: now[0]
+        self.store.observe(Observation("qq", "g1", "a", "A", "成员A", "最近在比赛"))
+        batch = self.store.next_batch(delay=0, limit=20)
+        self.store.apply_batch(batch, [{"kind": "state", "subject_id": "A", "key": "contest",
+            "content": "最近在比赛", "evidence_ids": ["a"], "confidence": 0.9, "ttl_days": 1}])
+        now[0] += 2 * 86400
+        async def forbidden_model(*args):
+            self.fail("Idle maintenance must not call a model")
+        engine = MemoryEngine(self.store, forbidden_model)
+        engine.start()
+        try:
+            for _ in range(100):
+                with self.store.connection() as db:
+                    remaining = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                if not remaining:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(remaining, 0)
+            self.assertTrue(list((self.store.directory / "backups").glob("auto-*.sqlite3")))
+        finally:
+            await engine.close()

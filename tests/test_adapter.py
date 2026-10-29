@@ -203,6 +203,26 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已删除", replies[0])
         self.assertFalse(store.profile(ns, scope, sender)["memories"])
 
+    async def test_pin_commands_keep_permissions_and_show_core_status(self):
+        await self.plugin.observe_message(Event())
+        store = self.plugin.backend.store
+        batch = store.next_batch(delay=0, limit=16)
+        store.apply_batch(batch, [{"kind": "preference", "subject_id": "1001", "key": "language", "content": "喜欢 Rust",
+                                   "evidence_ids": ["m1"], "confidence": 0.9}])
+        ns, scope, sender = self.plugin._identity(Event())
+        memory_id = store.profile(ns, scope, sender)["memories"][0]["id"]
+        replies = [reply async for reply in self.plugin.memory_command(Event(sender="1002"), "pin", memory_id)]
+        self.assertIn("只能设置自己的", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "pin", memory_id)]
+        self.assertIn("永久核心", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "status")]
+        self.assertIn("Core memories: 1", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "show")]
+        self.assertIn("/core", replies[0])
+        replies = [reply async for reply in self.plugin.memory_command(Event(), "unpin", memory_id)]
+        self.assertIn("取消核心保留", replies[0])
+        self.assertFalse(store.profile(ns, scope, sender)["memories"][0]["core"])
+
     async def test_message_to_background_memory_to_next_request(self):
         async def model(**kwargs):
             evidence = json.loads(kwargs["prompt"])["messages"][0]

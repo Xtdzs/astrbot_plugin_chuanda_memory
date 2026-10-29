@@ -53,8 +53,15 @@ class RemoteBackend:
     async def pause(self, namespace, scope, sender_id, *, erase=False):
         await self.call("pause", dict(namespace=namespace, scope=scope, sender_id=sender_id, erase=erase))
 
+    async def pin(self, namespace, scope, sender_id, memory_id, *, permanent=True, admin=False):
+        return (await self.call("pin", dict(namespace=namespace, scope=scope, sender_id=sender_id,
+                                            memory_id=memory_id, permanent=permanent, admin=admin)))["updated"]
+
     async def resume(self, namespace, scope, sender_id):
         await self.call("resume", dict(namespace=namespace, scope=scope, sender_id=sender_id))
+
+    async def retry_pending(self, namespace, scope, sender_id):
+        return (await self.call("retry", dict(namespace=namespace, scope=scope, sender_id=sender_id)))["requeued"]
 
     async def close(self):
         pass

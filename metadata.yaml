@@ -1,7 +1,7 @@
 name: astrbot_plugin_chuanda_memory
 display_name: 串大记忆
 desc: 按成员 ID 分批整理人物偏好、互动观察和群整体记忆；后台去重，可编辑提示词和本地可读副本。
-version: v0.3.0
+version: v0.3.1
 author: Xtdzs
 repo: https://github.com/Xtdzs/astrbot_plugin_chuanda_memory
 astrbot_version: ">=4.24.0"

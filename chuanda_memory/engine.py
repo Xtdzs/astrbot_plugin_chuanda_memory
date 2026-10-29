@@ -32,7 +32,7 @@ async def settled_thread_call(function, *args, **kwargs):
 
 class MemoryEngine:
     def __init__(self, store: MemoryStore, model_call: ModelCall, *, delay=300, batch_size=20, timeout=45, retention_days=14,
-                 min_batch=1, max_wait=1800, batching_mode="person"):
+                 min_batch=1, max_wait=1800, batching_mode="person", automatic_backups=True, backup_keep_days=7):
         self.store = store
         self.model_call = model_call
         self.delay = max(0, float(delay))
@@ -42,6 +42,9 @@ class MemoryEngine:
         self.min_batch = max(1, min(self.batch_size, int(min_batch)))
         self.max_wait = max(1, float(max_wait))
         self.batching_mode = batching_mode
+        self.automatic_backups = bool(automatic_backups)
+        self.backup_keep_days = max(1, min(90, int(backup_keep_days)))
+        self._maintenance_at = 0
         self._task = None
         self._wake = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -84,14 +87,19 @@ class MemoryEngine:
             self._task = asyncio.create_task(self._worker(), name="chuanda-memory-worker")
 
     async def _worker(self):
-        count = 0
         while True:
             try:
+                now = self.store.clock()
+                if now >= self._maintenance_at:
+                    self._maintenance_at = now + 3600
+                    try:
+                        if self.automatic_backups:
+                            await settled_thread_call(self.store.automatic_backup, self.backup_keep_days)
+                        await settled_thread_call(self.store.prune, self.retention_days)
+                    except Exception as exc:
+                        logger.warning("Chuanda memory maintenance deferred (%s)", type(exc).__name__)
                 had_work = await self.run_once()
                 if had_work:
-                    count += 1
-                    if count % 20 == 0:
-                        await settled_thread_call(self.store.prune, self.retention_days)
                     continue
                 self._wake.clear()
                 try:
@@ -135,11 +143,20 @@ class LocalBackend:
     async def forget(self, namespace, scope, sender_id, memory_id, *, admin=False):
         return await settled_thread_call(self.store.forget, namespace, scope, sender_id, memory_id, admin=admin)
 
+    async def pin(self, namespace, scope, sender_id, memory_id, *, permanent=True, admin=False):
+        return await settled_thread_call(self.store.pin, namespace, scope, sender_id, memory_id,
+                                         permanent=permanent, admin=admin)
+
     async def pause(self, namespace, scope, sender_id, *, erase=False):
         return await settled_thread_call(self.store.pause, namespace, scope, sender_id, erase=erase)
 
     async def resume(self, namespace, scope, sender_id):
         return await settled_thread_call(self.store.resume, namespace, scope, sender_id)
+
+    async def retry_pending(self, namespace, scope, sender_id):
+        result = await settled_thread_call(self.store.retry_pending, namespace, scope, sender_id)
+        self.engine._wake.set()
+        return result
 
     async def close(self):
         await self.engine.close()
